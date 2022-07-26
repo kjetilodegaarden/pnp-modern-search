@@ -53,6 +53,10 @@ export default class SearchResultsContainer extends React.Component<ISearchResul
     private _lastPageNumber: number;
     private _lastPageSelectedKeys: string[] = [];
 
+    private bufferUsageCount: number = 0;
+
+    private _bufferedItems: any[] = [];
+
     public constructor(props: ISearchResultsContainerProps) {
 
         super(props);
@@ -240,14 +244,57 @@ export default class SearchResultsContainer extends React.Component<ISearchResul
             let availableFilters: IDataFilterResult[] = [];
             let totalItemsCount = 0;
 
-            const localDataContext = cloneDeep(this.props.dataContext);
+            let localDataContext = cloneDeep(this.props.dataContext)
+            localDataContext.pageNumber = pageNumber - this.bufferUsageCount;
+        
+   
+            if (this._bufferedItems.length > 0) {
 
-            // Fetch live data
-            data = await this.props.dataSource.getData(localDataContext);
+                // Take next available batch from buffer
+                data.items = this._bufferedItems.slice(0, this.props.dataContext.itemsCountPerPage);
+            
+                if (this._bufferedItems.length < this.props.dataContext.itemsCountPerPage) {
 
+                    // Complete with new items for the current page number
+                    const newData = await this.props.dataSource.getData(localDataContext);
+                    data.items = data.items.concat(newData.items.slice(0, (this.props.dataContext.itemsCountPerPage - this._bufferedItems.length)));
+
+                    // If the new call has more data than the page size, we put in the buffer again
+                    if ((newData.items.length + this._bufferedItems.length) > this.props.dataContext.itemsCountPerPage) {
+                        this._bufferedItems = newData.items.slice((this.props.dataContext.itemsCountPerPage - this._bufferedItems.length), this.props.dataContext.itemsCountPerPage)
+                    } else {
+                        this._bufferedItems = [];
+                    }
+                } else {
+
+                    if (this._bufferedItems.length > this.props.dataContext.itemsCountPerPage) {
+
+                        // Next slice of items to display next time
+                        this._bufferedItems = this._bufferedItems.slice(this.props.dataContext.itemsCountPerPage, this._bufferedItems.length);
+                    } else {
+
+                        // Everything is processed
+                        this._bufferedItems  = [];
+                        this.bufferUsageCount++;
+                    }
+                }
+                
+            } else {
+                // Fetch live data
+                data = await this.props.dataSource.getData(localDataContext);
+            }
+            
             // Compute preview information for items ('AutoXX' properties)
             data = await this.getItemsPreview(data, this.convertTemplateSlotsToHashtable(this.props.properties.templateSlots));
 
+
+            // Check if more items a retrieved than the requested number (ex: Microsoft Search with multiple entities)
+            // Put the remaining ones in a buffer and use it next time instead of fetching new items from the source
+            if (data.items.length > this.props.dataContext.itemsCountPerPage) {
+                this._bufferedItems = data.items.slice(this.props.dataContext.itemsCountPerPage, data.items.length);
+                data.items = data.items.slice(0, this.props.dataContext.itemsCountPerPage);
+            }
+            
             // Determine total items count and page number
             totalItemsCount = this.props.dataSource.getItemCount();
 
@@ -281,6 +328,7 @@ export default class SearchResultsContainer extends React.Component<ISearchResul
             // Create a cloned copy of items to avoid mutation by the selection class
             this._selection.setItems(cloneDeep(data.items));
             this._lastPageNumber = pageNumber;
+    
 
         } catch (error) {
 

@@ -1,6 +1,6 @@
 import { BaseDataSource, FilterSortType, FilterSortDirection, ITemplateSlot, BuiltinTemplateSlots, IDataContext, ITokenService, FilterBehavior, PagingBehavior, IDataFilterResult, IDataFilterResultValue, FilterComparisonOperator } from "@pnp/modern-search-extensibility";
 import { IPropertyPaneGroup, PropertyPaneLabel, IPropertyPaneField, PropertyPaneToggle, PropertyPaneHorizontalRule } from "@microsoft/sp-property-pane";
-import { cloneDeep, isEmpty } from '@microsoft/sp-lodash-subset';
+import { cloneDeep, isEmpty, difference, sortBy, sumBy } from '@microsoft/sp-lodash-subset';
 import { MSGraphClientFactory } from "@microsoft/sp-http";
 import { TokenService } from "../services/tokenService/TokenService";
 import { ServiceScope } from '@microsoft/sp-core-library';
@@ -15,14 +15,14 @@ import { ISortFieldConfiguration } from '../models/search/ISortFieldConfiguratio
 import { AsyncCombo } from "../controls/PropertyPaneAsyncCombo/components/AsyncCombo";
 import { IAsyncComboProps } from "../controls/PropertyPaneAsyncCombo/components/IAsyncComboProps";
 import { PropertyPaneNonReactiveTextField } from "../controls/PropertyPaneNonReactiveTextField/PropertyPaneNonReactiveTextField";
-import { ISharePointSearchService } from "../services/searchService/ISharePointSearchService";
-import { SharePointSearchService } from "../services/searchService/SharePointSearchService";
 import { IMicrosoftSearchDataSourceData } from "../models/search/IMicrosoftSearchDataSourceData";
 import { SortFieldDirection } from "@pnp/modern-search-extensibility";
 import * as React from "react";
 import { IMicrosoftSearchResponse } from "../models/search/IMicrosoftSearchResponse";
 import { BuiltinDataSourceProviderKeys } from "./AvailableDataSources";
 import { SortableFields } from "../common/Constants";
+import { IGraphBatchRequest, IGraphBatchBody, HttpMethod } from "../models/msgraph/IGraphBatchRequest";
+import { ObjectHelper } from "../helpers/ObjectHelper";
 
 export enum EntityType {
     Message = 'message',
@@ -36,13 +36,14 @@ export enum EntityType {
     Person = 'person'
 }
 
+export const EntityTypesValidCombination = [EntityType.Drive, EntityType.DriveItem, EntityType.Site, EntityType.List, EntityType.ListItem]
+
 export interface IMicrosoftSearchDataSourceProperties {
 
     /**
      * The entity types to search. See for the complete list
      */
     entityTypes: EntityType[];
-
 
     /**
      * Contains the fields to be returned for each resource object specified in entityTypes, allowing customization of the fields returned by default otherwise, including additional fields such as custom managed properties from SharePoint and OneDrive, or custom fields in externalItem from content ingested by Graph connectors.
@@ -739,7 +740,7 @@ export class MicrosoftSearchDataSource extends BaseDataSource<IMicrosoftSearchDa
             entityTypes: this.properties.entityTypes,
             query: {
                 queryString: queryText,
-                queryTemplate: queryTemplate
+               // queryTemplate: queryTemplate
             },
             from: from,
             size: dataContext.itemsCountPerPage
@@ -793,6 +794,9 @@ export class MicrosoftSearchDataSource extends BaseDataSource<IMicrosoftSearchDa
      */
     private async search(searchQuery: IMicrosoftSearchQuery): Promise<IMicrosoftSearchDataSourceData> {
 
+        let batchRequestBody: IGraphBatchBody = {
+            requests: []
+        };     
         let itemsCount = 0;
         let response: IMicrosoftSearchDataSourceData = {
             items: [],
@@ -800,74 +804,138 @@ export class MicrosoftSearchDataSource extends BaseDataSource<IMicrosoftSearchDa
         };
         let aggregationResults: IDataFilterResult[] = [];
 
-        // Get an instance to the MSGraphClient
-        const msGraphClientFactory = this.serviceScope.consume<MSGraphClientFactory>(MSGraphClientFactory.serviceKey);
-        const msGraphClient = await msGraphClientFactory.getClient();
-        const request = await msGraphClient.api(this._microsoftSearchUrl);
-        const jsonResponse: IMicrosoftSearchResponse = await request.headers({ 'SdkVersion': 'pnpmodernsearch/' + this.context.manifest.version }).post(searchQuery);
+        // Determine if selected entity types represent a valid combination for Microsoft Search API. If not we use batch requests for all non valid types (ex: externalItem, person, message, event)
+        searchQuery.requests.forEach((originalSearchRequest: IMicrosoftSearchRequest) => {
 
-        if (jsonResponse.value && Array.isArray(jsonResponse.value)) {
+            // Get all entity types tht can't mixed together
+            const nonValidEntityTypes = difference(originalSearchRequest.entityTypes, EntityTypesValidCombination);
 
-            jsonResponse.value.forEach((value: IMicrosoftSearchResultSet) => {
+            let batchRequests = nonValidEntityTypes.map((entityType: EntityType) => {
 
-                // Map results
-                value.hitsContainers.forEach(hitContainer => {
-                    itemsCount += hitContainer.total;
+                // Update the original search query to add only this type but keep all other settings
+                const searchRequestForEntityType = cloneDeep(originalSearchRequest);
+                searchRequestForEntityType.entityTypes = [entityType];
 
-                    if (hitContainer.hits) {
+                if (entityType !== EntityType.ExternalItem) {
+                    delete searchRequestForEntityType.contentSources;
+                }
 
-                        const hits = hitContainer.hits.map(hit => {
-
-                            if (hit.resource.fields) {
-
-                                // Flatten 'fields' to be usable with the Search Fitler WP as refiners
-                                Object.keys(hit.resource.fields).forEach(field => {
-                                    hit[field] = hit.resource.fields[field];
-                                });
-                            }
-
-                            return hit;
-                        });
-
-                        response.items = response.items.concat(hits);
+                return {
+                    id: entityType,
+                    method: HttpMethod.Post,
+                    url: "/search/query",
+                    body: {requests: [searchRequestForEntityType]},
+                    headers: {
+                        "Content-Type": "application/json"
                     }
+                } as IGraphBatchRequest;
+            });
 
-                    if (hitContainer.aggregations) {
+            // Gather all remaining valid entity types in a single query as they can be retrieved together 
+            const validEntityTypes = difference(originalSearchRequest.entityTypes, nonValidEntityTypes);
+            if (validEntityTypes.length > 0) {
 
-                        // Map refinement results
-                        hitContainer.aggregations.forEach((aggregation) => {
+                originalSearchRequest.entityTypes = validEntityTypes;
+                delete originalSearchRequest.contentSources; // Can't be 'externalItem'
 
-                            let values: IDataFilterResultValue[] = [];
-                            aggregation.buckets.forEach((bucket) => {
-                                values.push({
-                                    count: bucket.count,
-                                    name: bucket.key,
-                                    value: bucket.aggregationFilterToken,
-                                    operator: FilterComparisonOperator.Contains
-                                } as IDataFilterResultValue);
-                            });
-
-                            aggregationResults.push({
-                                filterName: aggregation.field,
-                                values: values
-                            });
-                        });
-
-                        response.filters = aggregationResults;
+                batchRequests.push({
+                    id: originalSearchRequest.entityTypes.toString(),
+                    method: HttpMethod.Post,
+                    url: "/search/query",
+                    body: {requests: [originalSearchRequest]},
+                    headers: {
+                        "Content-Type": "application/json"
                     }
                 });
 
-                if (value?.queryAlterationResponse) {
-                    response.queryAlterationResponse = value.queryAlterationResponse;
-                }
+            }
+        
+            batchRequestBody.requests = batchRequests;
+        });
 
-                if (value?.resultTemplates) {
-                    response.resultTemplates = value.resultTemplates;
-                }
-            });
+        if (batchRequestBody.requests.length > 0) {
+
+            const msGraphClientFactory = this.serviceScope.consume<MSGraphClientFactory>(MSGraphClientFactory.serviceKey);
+            const msGraphClient = await msGraphClientFactory.getClient();
+            const request = await msGraphClient.api("https://graph.microsoft.com/v1.0/$batch", );
+            const batchJsonResponse = await request.headers({ 'SdkVersion': 'pnpmodernsearch/' + this.context.manifest.version }).post(batchRequestBody);
+    
+            if (batchJsonResponse.responses && Array.isArray(batchJsonResponse.responses)) {
+
+                batchJsonResponse.responses.forEach((batchResponse) => {
+
+                    if (batchResponse.status === 200 &&  Array.isArray(batchResponse.body.value)) {
+
+                        batchResponse.body.value.forEach((value: IMicrosoftSearchResultSet) => {
+
+                            value.hitsContainers.forEach(hitContainer => {
+
+                                // Only add the total count if more items are available
+                               // if (hitContainer.moreResultsAvailable && hitContainer.hits.length > 0) {
+                                    itemsCount += hitContainer.total;
+                              //  } 
+            
+                                if (hitContainer.hits) {
+            
+                                    const hits = hitContainer.hits.map(hit => {
+            
+                                        if (hit.resource.fields) {
+            
+                                            // Flatten 'fields' to be usable with the Search Fitler WP as refiners
+                                            Object.keys(hit.resource.fields).forEach(field => {
+                                                hit[field] = hit.resource.fields[field];
+                                            });
+                                        }
+            
+                                        return hit;
+                                    });
+            
+                                    response.items = response.items.concat(hits);
+                                }
+            
+                                if (hitContainer.aggregations) {
+            
+                                    // Map refinement results
+                                    hitContainer.aggregations.forEach((aggregation) => {
+            
+                                        let values: IDataFilterResultValue[] = [];
+                                        aggregation.buckets.forEach((bucket) => {
+                                            values.push({
+                                                count: bucket.count,
+                                                name: bucket.key,
+                                                value: bucket.aggregationFilterToken,
+                                                operator: FilterComparisonOperator.Contains
+                                            } as IDataFilterResultValue);
+                                        });
+            
+                                        aggregationResults.push({
+                                            filterName: aggregation.field,
+                                            values: values
+                                        });
+                                    });
+            
+                                    response.filters = aggregationResults;
+                                }
+                            });
+
+                            if (value?.queryAlterationResponse) {
+                                response.queryAlterationResponse = value.queryAlterationResponse;
+                            }
+            
+                            if (value?.resultTemplates) {
+                                response.resultTemplates = value.resultTemplates;
+                            }
+                        });
+
+                    } else {
+                        // Log something
+                    }
+                });          
+            }
         }
 
         this._itemsCount = itemsCount;
+        response.items = sortBy(response.items, (e) => e.rank);
 
         return response;
     }

@@ -41,7 +41,7 @@ export class TemplateRenderer extends React.Component<ITemplateRendererProps, IT
 
 
         if (this.state.processedTemplate) {
-            // We need to set a key to force an update if Wthe template context changes
+            // We need to set a key to force an update if the template context changes
             return <div className={rootCssClassName} dangerouslySetInnerHTML={{ __html: this.state.processedTemplate }}></div>;
         } else {
             return null;

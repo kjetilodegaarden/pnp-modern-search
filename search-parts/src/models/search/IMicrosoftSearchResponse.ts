@@ -2,7 +2,7 @@ import { IResultTemplates } from "@pnp/modern-search-extensibility";
 
 // https://docs.microsoft.com/en-us/graph/api/resources/searchresponse?view=graph-rest-beta
 export interface IMicrosoftSearchResponse {
-    value: IMicrosoftSearchResultSet;
+    value: IMicrosoftSearchResultSet[];
 }
 
 export interface IMicrosoftSearchResultSet {
