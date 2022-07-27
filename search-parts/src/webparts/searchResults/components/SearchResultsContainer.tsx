@@ -55,7 +55,9 @@ export default class SearchResultsContainer extends React.Component<ISearchResul
 
     private bufferUsageCount: number = 0;
 
-    private _bufferedItems: any[] = [];
+    private _bufferedData: IDataSourceData = {
+        items: []
+    };
 
     public constructor(props: ISearchResultsContainerProps) {
 
@@ -247,34 +249,36 @@ export default class SearchResultsContainer extends React.Component<ISearchResul
             let localDataContext = cloneDeep(this.props.dataContext)
             localDataContext.pageNumber = pageNumber - this.bufferUsageCount;
         
-   
-            if (this._bufferedItems.length > 0) {
+            // If we have items in the buffer we display them instead of fetching new ones
+            if (this._bufferedData.items.length > 0 && pageNumber > 1) {
 
+                data = cloneDeep(this._bufferedData);
                 // Take next available batch from buffer
-                data.items = this._bufferedItems.slice(0, this.props.dataContext.itemsCountPerPage);
-            
-                if (this._bufferedItems.length < this.props.dataContext.itemsCountPerPage) {
+                data.items = this._bufferedData.items.slice(0, this.props.dataContext.itemsCountPerPage);
+    
+                // Case where there is not enough items to fill the current page
+                if (this._bufferedData.items.length < this.props.dataContext.itemsCountPerPage) {
 
                     // Complete with new items for the current page number
                     const newData = await this.props.dataSource.getData(localDataContext);
-                    data.items = data.items.concat(newData.items.slice(0, (this.props.dataContext.itemsCountPerPage - this._bufferedItems.length)));
+                    data.items = data.items.concat(newData.items.slice(0, (this.props.dataContext.itemsCountPerPage - this._bufferedData.items.length)));
 
                     // If the new call has more data than the page size, we put in the buffer again
-                    if ((newData.items.length + this._bufferedItems.length) > this.props.dataContext.itemsCountPerPage) {
-                        this._bufferedItems = newData.items.slice((this.props.dataContext.itemsCountPerPage - this._bufferedItems.length), this.props.dataContext.itemsCountPerPage)
+                    if ((newData.items.length + this._bufferedData.items.length) > this.props.dataContext.itemsCountPerPage) {
+                        this._bufferedData.items = newData.items.slice((this.props.dataContext.itemsCountPerPage - this._bufferedData.items.length), this.props.dataContext.itemsCountPerPage)
                     } else {
-                        this._bufferedItems = [];
+                        this._bufferedData.items = [];
                     }
                 } else {
 
-                    if (this._bufferedItems.length > this.props.dataContext.itemsCountPerPage) {
+                    if (this._bufferedData.length > this.props.dataContext.itemsCountPerPage) {
 
                         // Next slice of items to display next time
-                        this._bufferedItems = this._bufferedItems.slice(this.props.dataContext.itemsCountPerPage, this._bufferedItems.length);
+                        this._bufferedData.items = this._bufferedData.items.slice(this.props.dataContext.itemsCountPerPage, this._bufferedData.items.length);
                     } else {
 
                         // Everything is processed
-                        this._bufferedItems  = [];
+                        this._bufferedData.items  = [];
                         this.bufferUsageCount++;
                     }
                 }
@@ -291,8 +295,11 @@ export default class SearchResultsContainer extends React.Component<ISearchResul
             // Check if more items a retrieved than the requested number (ex: Microsoft Search with multiple entities)
             // Put the remaining ones in a buffer and use it next time instead of fetching new items from the source
             if (data.items.length > this.props.dataContext.itemsCountPerPage) {
-                this._bufferedItems = data.items.slice(this.props.dataContext.itemsCountPerPage, data.items.length);
+
+                this._bufferedData = cloneDeep(data);
+                this._bufferedData.items = data.items.slice(this.props.dataContext.itemsCountPerPage, data.items.length);
                 data.items = data.items.slice(0, this.props.dataContext.itemsCountPerPage);
+
             }
             
             // Determine total items count and page number

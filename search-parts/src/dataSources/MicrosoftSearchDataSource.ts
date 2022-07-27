@@ -857,7 +857,7 @@ export class MicrosoftSearchDataSource extends BaseDataSource<IMicrosoftSearchDa
 
             const msGraphClientFactory = this.serviceScope.consume<MSGraphClientFactory>(MSGraphClientFactory.serviceKey);
             const msGraphClient = await msGraphClientFactory.getClient();
-            const request = await msGraphClient.api("https://graph.microsoft.com/v1.0/$batch", );
+            const request = await msGraphClient.api("https://graph.microsoft.com/beta/$batch");
             const batchJsonResponse = await request.headers({ 'SdkVersion': 'pnpmodernsearch/' + this.context.manifest.version }).post(batchRequestBody);
     
             if (batchJsonResponse.responses && Array.isArray(batchJsonResponse.responses)) {
@@ -870,10 +870,7 @@ export class MicrosoftSearchDataSource extends BaseDataSource<IMicrosoftSearchDa
 
                             value.hitsContainers.forEach(hitContainer => {
 
-                                // Only add the total count if more items are available
-                               // if (hitContainer.moreResultsAvailable && hitContainer.hits.length > 0) {
-                                    itemsCount += hitContainer.total;
-                              //  } 
+                                itemsCount += hitContainer.total;
             
                                 if (hitContainer.hits) {
             
