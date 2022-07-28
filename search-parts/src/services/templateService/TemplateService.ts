@@ -1,12 +1,12 @@
 import { FileFormat, ITemplateService } from "./ITemplateService";
-import { ServiceKey, ServiceScope, Text } from "@microsoft/sp-core-library";
+import { Log, ServiceKey, ServiceScope, Text } from "@microsoft/sp-core-library";
 import { SPHttpClient, SPHttpClientResponse } from '@microsoft/sp-http';
 import * as Handlebars from 'handlebars';
 import { uniqBy, uniq, isEmpty, trimEnd, get } from "@microsoft/sp-lodash-subset";
 import * as strings from 'CommonStrings';
 import { DateHelper } from "../../helpers/DateHelper";
 import { PageContext } from "@microsoft/sp-page-context";
-import { IComponentDefinition, IResultTemplates, LayoutRenderType } from "@pnp/modern-search-extensibility";
+import { IComponentDefinition, IExtensibilityLibrary, IResultTemplates, LayoutRenderType } from "@pnp/modern-search-extensibility";
 import groupBy from 'handlebars-group-by';
 import { IComponentFieldsConfiguration } from "../../models/common/IComponentFieldsConfiguration";
 import { initializeFileTypeIcons } from '@uifabric/file-type-icons';
@@ -20,8 +20,11 @@ import * as handlebarsHelpers from 'handlebars-helpers';
 import { ServiceScopeHelper } from "../../helpers/ServiceScopeHelper";
 import { DomPurifyHelper } from "../../helpers/DomPurifyHelper";
 import * as DOMPurify from 'dompurify';
+import { Action, ExecuteAction, OpenUrlAction, SubmitAction } from 'adaptivecards';
+import { IAdaptiveCardAction } from '@pnp/modern-search-extensibility';
 
 const TemplateService_ServiceKey = 'PnPModernSearchTemplateService';
+const TemplateService_LogSource = "PnPModernSearch:TemplateService";
 
 /**
  * The CSS identifer to load the template markup from a layout html file
@@ -65,6 +68,19 @@ export class TemplateService implements ITemplateService {
 
     get Handlebars(): typeof Handlebars {
         return this._handlebars;
+    }
+
+    /**
+     * Collection of event handlers for adaptive cards, if any
+     */
+    private _adaptiveCardsExtensibilityLibraries: IExtensibilityLibrary[] = [];
+
+    get AdaptiveCardsExtensibilityLibraries(): IExtensibilityLibrary[] {
+        return this._adaptiveCardsExtensibilityLibraries;
+    }
+
+    set AdaptiveCardsExtensibilityLibraries(value: IExtensibilityLibrary[]) {
+        this._adaptiveCardsExtensibilityLibraries = value;
     }
 
     public static ServiceKey: ServiceKey<ITemplateService> = ServiceKey.create(TemplateService_ServiceKey, TemplateService);
@@ -248,8 +264,8 @@ export class TemplateService implements ITemplateService {
      * Compile the specified Handlebars template with the associated context object¸
      * @returns the compiled HTML template string
      */
-    public async processTemplate(templateContext: ISearchResultsTemplateContext | ISearchFiltersTemplateContext, templateContent: string, renderType: LayoutRenderType): Promise<string> {
-        let processedTemplate: string = templateContent;
+    public async processTemplate(templateContext: ISearchResultsTemplateContext | ISearchFiltersTemplateContext, templateContent: string, renderType: LayoutRenderType): Promise<string | HTMLElement> {
+        let processedTemplate: string | HTMLElement = templateContent;
 
         switch (renderType) {
             case LayoutRenderType.Handlebars:
@@ -405,9 +421,9 @@ export class TemplateService implements ITemplateService {
         return template(templateContext);
     }
 
-    private async _renderAdaptiveCardsTemplate(templateContext: ISearchResultsTemplateContext | ISearchFiltersTemplateContext, templateContent: string): Promise<string> {
+    private async _renderAdaptiveCardsTemplate(templateContext: ISearchResultsTemplateContext | ISearchFiltersTemplateContext, templateContent: string): Promise<HTMLElement> {
 
-        let renderTemplateContent = null;
+        let renderTemplateContent: HTMLElement = null;
 
         // Load dynamic resources
         await this._initAdaptiveCardsResources();
@@ -441,10 +457,56 @@ export class TemplateService implements ITemplateService {
             const card = template.expand(context);
             const adaptiveCard = new this._adaptiveCardsNS.AdaptiveCard();
             adaptiveCard.hostConfig = hostConfiguration;
+            
+            // Register the dynamic list of event handlers for Adaptive Cards actions, if any
+            if (this.AdaptiveCardsExtensibilityLibraries != null && this.AdaptiveCardsExtensibilityLibraries.length > 0) {
+                adaptiveCard.onExecuteAction = (action: Action) => {
+
+                    let actionResult: IAdaptiveCardAction;
+                    const type = action.getJsonTypeName();
+                    switch (type) {
+                        case OpenUrlAction.JsonTypeName: {
+                            let typedAction = action as OpenUrlAction;
+                            actionResult = {
+                                type: type,
+                                title: typedAction.title,
+                                url: typedAction.url
+                            };
+                        }
+                            break;
+        
+                        case SubmitAction.JsonTypeName: {
+                            let typedAction = action as SubmitAction;
+                            actionResult = {
+                                type: type,
+                                title: typedAction.title,
+                                data: typedAction.data
+                            };
+                        }
+                            break;
+                        case ExecuteAction.JsonTypeName: {
+                            let typedAction = action as ExecuteAction;
+                            actionResult = {
+                                type: type,
+                                title: typedAction.title,
+                                data: typedAction.data,
+                                verb: typedAction.verb
+                            };
+                        }
+                            break;
+                    }
+
+                    this.AdaptiveCardsExtensibilityLibraries.forEach(l => l.invokeCardAction(actionResult));
+                };                
+            } else {
+                adaptiveCard.onExecuteAction = (action: Action) => {
+                    Log.info(TemplateService_LogSource, `Triggered an event from an Adaptive Card, with action: '${action.title}'. Please, register a custom Extension Library in order to handle it.`, this.serviceScope);
+                };
+            }
+
             adaptiveCard.parse(card);
 
-            const htmlTemplateElement: HTMLElement = adaptiveCard.render();
-            renderTemplateContent = htmlTemplateElement.outerHTML;
+            renderTemplateContent = adaptiveCard.render();
         }
 
         return renderTemplateContent;
@@ -799,7 +861,7 @@ export class TemplateService implements ITemplateService {
         }
     }
 
-    private _buildAdaptiveCardsResultTypes(templateContent: string, templateContext: ISearchResultsTemplateContext, resultTemplates: IResultTemplates, hostConfiguration): string {
+    private _buildAdaptiveCardsResultTypes(templateContent: string, templateContext: ISearchResultsTemplateContext, resultTemplates: IResultTemplates, hostConfiguration): HTMLElement {
 
         // Parse and render the main card template
         const mainCard = new this._adaptiveCardsNS.AdaptiveCard();
@@ -812,6 +874,7 @@ export class TemplateService implements ITemplateService {
 
         const card = template.expand(context);
         mainCard.parse(card);
+
         const mainHtml = mainCard.render();
 
         // Build dictionary of available result template
@@ -835,6 +898,7 @@ export class TemplateService implements ITemplateService {
 
                 const itemAdaptiveCard = new this._adaptiveCardsNS.AdaptiveCard();
                 itemAdaptiveCard.hostConfig = hostConfiguration;
+
                 itemAdaptiveCard.parse(itemCard);
 
                 // Partial match as we can't use the complete ID due to special characters "/" and "==""
@@ -848,6 +912,6 @@ export class TemplateService implements ITemplateService {
             }
         }
 
-        return mainHtml.outerHTML;
+        return mainHtml;
     }
 }
