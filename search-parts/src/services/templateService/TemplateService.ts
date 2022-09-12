@@ -20,8 +20,9 @@ import * as handlebarsHelpers from 'handlebars-helpers';
 import { ServiceScopeHelper } from "../../helpers/ServiceScopeHelper";
 import { DomPurifyHelper } from "../../helpers/DomPurifyHelper";
 import * as DOMPurify from 'dompurify';
-import { Action, ExecuteAction, OpenUrlAction, SubmitAction } from 'adaptivecards';
 import { IAdaptiveCardAction } from '@pnp/modern-search-extensibility';
+import { useLocalFluentUI } from '../../controls/TemplateRenderer/fluentUI';   
+import { Action, CardElement } from "adaptivecards";
 
 const TemplateService_ServiceKey = 'PnPModernSearchTemplateService';
 const TemplateService_LogSource = "PnPModernSearch:TemplateService";
@@ -46,6 +47,7 @@ export class TemplateService implements ITemplateService {
     private _adaptiveCardsNS;
     private _markdownIt;
     private _adaptiveCardsTemplating;
+    private _serializationContext;
 
     /**
      * The moment.js library reference
@@ -457,40 +459,37 @@ export class TemplateService implements ITemplateService {
             const card = template.expand(context);
             const adaptiveCard = new this._adaptiveCardsNS.AdaptiveCard();
             adaptiveCard.hostConfig = hostConfiguration;
-            
+
             // Register the dynamic list of event handlers for Adaptive Cards actions, if any
             if (this.AdaptiveCardsExtensibilityLibraries != null && this.AdaptiveCardsExtensibilityLibraries.length > 0) {
-                adaptiveCard.onExecuteAction = (action: Action) => {
+                adaptiveCard.onExecuteAction = (action: any) => {
 
                     let actionResult: IAdaptiveCardAction;
                     const type = action.getJsonTypeName();
                     switch (type) {
-                        case OpenUrlAction.JsonTypeName: {
-                            let typedAction = action as OpenUrlAction;
+                        case this._adaptiveCardsNS.OpenUrlAction.JsonTypeName: {
                             actionResult = {
                                 type: type,
-                                title: typedAction.title,
-                                url: typedAction.url
+                                title: action.title,
+                                url: action.url
                             };
                         }
                             break;
         
-                        case SubmitAction.JsonTypeName: {
-                            let typedAction = action as SubmitAction;
+                        case this._adaptiveCardsNS.SubmitAction.JsonTypeName: {
                             actionResult = {
                                 type: type,
-                                title: typedAction.title,
-                                data: typedAction.data
+                                title: action.title,
+                                data: action.data
                             };
                         }
                             break;
-                        case ExecuteAction.JsonTypeName: {
-                            let typedAction = action as ExecuteAction;
+                        case this._adaptiveCardsNS.ExecuteAction.JsonTypeName: {
                             actionResult = {
                                 type: type,
-                                title: typedAction.title,
-                                data: typedAction.data,
-                                verb: typedAction.verb
+                                title: action.title,
+                                data: action.data,
+                                verb: action.verb
                             };
                         }
                             break;
@@ -499,13 +498,12 @@ export class TemplateService implements ITemplateService {
                     this.AdaptiveCardsExtensibilityLibraries.forEach(l => l.invokeCardAction(actionResult));
                 };                
             } else {
-                adaptiveCard.onExecuteAction = (action: Action) => {
+                adaptiveCard.onExecuteAction = (action: any) => {
                     Log.info(TemplateService_LogSource, `Triggered an event from an Adaptive Card, with action: '${action.title}'. Please, register a custom Extension Library in order to handle it.`, this.serviceScope);
                 };
             }
 
-            adaptiveCard.parse(card);
-
+            adaptiveCard.parse(card, this._serializationContext);
             renderTemplateContent = adaptiveCard.render();
         }
 
@@ -814,6 +812,26 @@ export class TemplateService implements ITemplateService {
 
     private async _initAdaptiveCardsResources(): Promise<void> {
 
+        // Initialize the serialization context for the Adaptive Cards, if needed
+        if (!this._serializationContext) {
+
+            const { Action, CardElement, CardObjectRegistry, GlobalRegistry, SerializationContext } = await import(
+                'adaptivecards'
+            );
+
+            this._serializationContext = new SerializationContext();
+
+            let elementRegistry = new CardObjectRegistry<CardElement>();
+            let actionRegistry = new CardObjectRegistry<Action>();
+        
+            GlobalRegistry.populateWithDefaultElements(elementRegistry);
+            GlobalRegistry.populateWithDefaultActions(actionRegistry);
+        
+            useLocalFluentUI(elementRegistry, actionRegistry);
+            this._serializationContext.setElementRegistry(elementRegistry);
+            this._serializationContext.setActionRegistry(actionRegistry);
+        }
+
         if (!this._adaptiveCardsNS) {
 
             const domPurify = DOMPurify.default;
@@ -873,7 +891,7 @@ export class TemplateService implements ITemplateService {
         };
 
         const card = template.expand(context);
-        mainCard.parse(card);
+        mainCard.parse(card, this._serializationContext);
 
         const mainHtml = mainCard.render();
 
@@ -899,7 +917,7 @@ export class TemplateService implements ITemplateService {
                 const itemAdaptiveCard = new this._adaptiveCardsNS.AdaptiveCard();
                 itemAdaptiveCard.hostConfig = hostConfiguration;
 
-                itemAdaptiveCard.parse(itemCard);
+                itemAdaptiveCard.parse(itemCard, this._serializationContext);
 
                 // Partial match as we can't use the complete ID due to special characters "/" and "==""
                 const defaultItem: HTMLElement = mainHtml.querySelector(`[id^="${item.hitId.substring(0, 15)}"]`);
